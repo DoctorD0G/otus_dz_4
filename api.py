@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
 import abc
 import json
 import datetime
@@ -36,36 +33,95 @@ GENDERS = {
 }
 
 
-class CharField(object):
-    pass
+class Field(abc.ABC):
+    def __init__(self, required=False, nullable=False):
+        self.required = required
+        self.nullable = nullable
+
+    @abc.abstractmethod
+    def validate(self, value):
+        pass
 
 
-class ArgumentsField(object):
-    pass
+class CharField(Field):
+    def validate(self, value):
+        if self.required and (value is None or value == ''):
+            return False
+        if not self.nullable and value is None:
+            return False
+        return isinstance(value, str)
 
 
 class EmailField(CharField):
-    pass
+    def validate(self, value):
+        if not super().validate(value):
+            return False
+        if '@' not in value:
+            return False
+        return True
 
 
-class PhoneField(object):
-    pass
+class PhoneField(Field):
+    def validate(self, value):
+        if self.required and (value is None or value == ''):
+            return False
+        if value is not None and not isinstance(value, str):
+            return False
+        return True
 
 
-class DateField(object):
-    pass
+class DateField(Field):
+    def validate(self, value):
+        if self.required and (value is None or value == ''):
+            return False
+        if value is not None:
+            try:
+                datetime.datetime.strptime(value, "%Y-%m-%d")
+            except ValueError:
+                return False
+        return True
 
 
-class BirthDayField(object):
-    pass
+class BirthDayField(DateField):
+    def validate(self, value):
+        if not super().validate(value):
+            return False
+        if value is not None:
+            birth_date = datetime.datetime.strptime(value, "%Y-%m-%d")
+            return birth_date < datetime.datetime.now()
+        return True
 
 
-class GenderField(object):
-    pass
+class ArgumentsField(Field):
+    def __init__(self, required=False, nullable=False, fields=None):
+        super().__init__(required, nullable)
+        self.fields = fields or {}
+
+    def validate(self, value):
+        if self.required and (value is None or not isinstance(value, dict)):
+            return False
+        if value is not None:
+            if not isinstance(value, dict):
+                return False
+            for field_name, field in self.fields.items():
+                field_value = value.get(field_name, None)
+                if not field.validate(field_value):
+                    return False
+        return True
 
 
-class ClientIDsField(object):
-    pass
+class GenderField(Field):
+    def validate(self, value):
+        if value is not None and value not in GENDERS:
+            return False
+        return True
+
+
+class ClientIDsField(Field):
+    def validate(self, value):
+        if self.required and (value is None or not isinstance(value, list) or len(value) == 0):
+            return False
+        return True
 
 
 class ClientsInterestsRequest(object):
@@ -93,6 +149,14 @@ class MethodRequest(object):
     def is_admin(self):
         return self.login == ADMIN_LOGIN
 
+    def validate(self):
+        for field_name, field in self.__class__.__dict__.items():
+            if isinstance(field, Field):
+                value = getattr(self, field_name, None)
+                if not field.validate(value):
+                    return False, f"Invalid value for field '{field_name}'"
+        return True, None
+
 
 def check_auth(request):
     if request.is_admin:
@@ -104,6 +168,17 @@ def check_auth(request):
 
 def method_handler(request, ctx, store):
     response, code = None, None
+    method_request = MethodRequest(**request['body'])
+    is_valid, error = method_request.validate()
+    if not is_valid:
+        return {"error": error}, INVALID_REQUEST
+
+    if check_auth(method_request):
+        response = {"status": "success"}
+        code = OK
+    else:
+        return {"error": "Unauthorized"}, FORBIDDEN
+
     return response, code
 
 
@@ -123,7 +198,8 @@ class MainHTTPHandler(BaseHTTPRequestHandler):
         try:
             data_string = self.rfile.read(int(self.headers['Content-Length']))
             request = json.loads(data_string)
-        except:
+        except Exception as e:
+            logging.error("Failed to read request: %s", e)
             code = BAD_REQUEST
 
         if request:
